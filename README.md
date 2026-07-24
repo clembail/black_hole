@@ -1,71 +1,78 @@
 # **black**_**hole**
 
-Black hole simulation project
+A fully native macOS 3D and 2D Black Hole simulator, rewritten to use Apple's **Metal** graphics API and **AppKit**, delivering real-time relativistic raytracing of spacetime.
 
-Here is the black hole raw code, everything will be inside a src bin incase you want to copy the files
+## Features
 
-I'm writing this as I'm beginning this project (hopefully I complete it ;D) here is what I plan to do:
+1. **Ray-tracing**: Simulates gravitational lensing using Runge-Kutta 4 integration directly on the GPU Compute Shaders.
+2. **Accretion Disk**: Simulates an accretion disk that interacts visually with the black hole's gravity.
+3. **Spacetime Curvature**: Demonstrates visually the "trapdoor in spacetime" (Flamm's paraboloid) using a dynamic spacetime grid.
+4. **100% Native macOS**: Uses `metal-cpp` and AppKit for native windowing, trackpad scrolling, and GPU acceleration without heavy dependencies like GLFW or OpenGL.
 
-1. Ray-tracing : add ray tracing to the gravity simulation to simulate gravitational lensing
+---
 
-2. Accretion disk : simulate accreciate disk using the ray tracing + the halos
+## **Building Requirements**
 
-3. Spacetime curvature : demonstrate visually the "trapdoor in spacetime" that is black holes using spacetime grid
+1. A Mac (Apple Silicon or Intel).
+2. [CMake](https://cmake.org/) (if building from terminal) or Xcode.
+3. Apple's `metal-cpp` and `metal-cpp-extensions`.
 
-4. [optional] try to make it run realtime ;D
+### **Installing `metal-cpp`**
+Because this project is written in C++ but uses macOS native frameworks, you need Apple's C++ headers for Metal and AppKit.
+1. Download `metal-cpp` from Apple's developer portal.
+2. Place the `metal-cpp` and `metal-cpp-extensions` folders into `/opt/metal/`. 
+   (If you prefer another location, just update the paths in `CMakeLists.txt` or your Xcode project's Header Search Paths).
 
-I hope it works :/
+---
 
-Edit: After completion of project -
-
-## **Building Requirements:**
-
-1. C++ Compiler supporting C++ 17 or newer
-
-2. [Cmake](https://cmake.org/)
-
-3. [Vcpkg](https://vcpkg.io/en/)
-
-4. [Git](https://git-scm.com/)
-
-## **Build Instructions:**
+## **Build Instructions (Terminal / CMake)**
 
 1. Clone the repository:
-	-  `git clone https://github.com/kavan010/black_hole.git`
-2. CD into the newly cloned directory
-	- `cd ./black_hole` 
-3. Install dependencies with Vcpkg
-	- `vcpkg install`
-4. Get the vcpkg cmake toolchain file path
-	- `vcpkg integrate install`
-	- This will output something like : `CMake projects should use: "-DCMAKE_TOOLCHAIN_FILE=/path/to/vcpkg/scripts/buildsystems/vcpkg.cmake"`
-5. Create a build directory
-	- `mkdir build`
-6. Configure project with CMake
-	-  `cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=/path/to/vcpkg/scripts/buildsystems/vcpkg.cmake`
-	- Use the vcpkg cmake toolchain path from above
-7. Build the project
-	- `cmake --build build`
-8. Run the program
-	- The executables will be located in the build folder
+   ```bash
+   git clone https://github.com/clembail/black_hole.git
+   cd black_hole
+   ```
 
-### Alternative: Debian/Ubuntu apt workaround
+2. Create a build directory and configure:
+   ```bash
+   cmake -B build
+   ```
 
-If you don't want to use vcpkg, or you just need a quick way to install the native development packages on Debian/Ubuntu, install these packages and then run the normal CMake steps above:
+3. Compile the project:
+   ```bash
+   make -C build
+   ```
 
-```bash
-sudo apt update
-sudo apt install build-essential cmake \
-	libglew-dev libglfw3-dev libglm-dev libgl1-mesa-dev
-```
+4. Run the simulation:
+   ```bash
+   cd build
+   ./BlackHole3D   # For the 3D Spacetime & Raytracing Simulation
+   ./BlackHole2D   # For the 2D Gravitational Lensing Simulation
+   ```
 
-This provides the GLEW, GLFW, GLM and OpenGL development files so `find_package(...)` calls in `CMakeLists.txt` can locate the libraries. After installing, run the `cmake -B build -S .` and `cmake --build build` commands as shown in the Build Instructions.
+---
 
-## **How the code works:**
-for 2D: simple, just run 2D_lensing.cpp with the nessesary dependencies installed.
+## **Build Instructions (Xcode)**
 
-for 3D: black_hole.cpp and geodesic.comp work together to run the simuation faster using GPU, essentially it sends over a UBO and geodesic.comp runs heavy calculations using that data.
+1. Create a new "Command Line Tool" C++ project in Xcode.
+2. Drag and drop `black_hole.cpp`, `metal_impl.cpp`, `MathHelpers.h`, and `shaders.metal` into your Xcode project. (Replace the default `main.cpp`).
+3. Under **Build Settings** > **Header Search Paths**, add:
+   - `/opt/metal/metal-cpp`
+   - `/opt/metal/metal-cpp-extensions`
+4. Under **Build Phases** > **Link Binary With Libraries**, add:
+   - `Metal.framework`
+   - `Foundation.framework`
+   - `Cocoa.framework`
+   - `QuartzCore.framework`
+   - `AppKit.framework`
+   - `MetalKit.framework`
+5. Change the **C++ Language Dialect** to `C++17` (or newer).
+6. Press the Play button! Xcode will automatically compile `shaders.metal` into its default `.metallib` and run the simulation natively.
 
-should work with nessesary dependencies installed, however I have only run it on windows with my GPU so am not sure!
+---
 
-LMK if you would like an in-depth explanation of how the code works aswell :)
+## **Controls**
+
+- **Left Click + Drag**: Rotate the camera around the black hole.
+- **Scroll (Mouse Wheel / Two-finger Trackpad)**: Zoom in and out.
+- **Key 'G'**: Toggle Gravity on and off for the surrounding celestial objects (they will start orbiting the black hole and bending spacetime dynamically).
