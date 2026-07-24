@@ -1,16 +1,18 @@
-#include <GL/glew.h>
-#include <GLFW/glfw3.h>
-#include <glm/glm.hpp>
-#include <glm/gtc/matrix_transform.hpp>
-#include <glm/gtc/type_ptr.hpp>
+#include <Foundation/Foundation.hpp>
+#include <Metal/Metal.hpp>
+#include <AppKit/AppKit.hpp>
+#include <MetalKit/MetalKit.hpp>
+
+#include <CoreGraphics/CoreGraphics.h>
+#include <Carbon/Carbon.h>
+
 #include <vector>
 #include <iostream>
 #define _USE_MATH_DEFINES
 #include <cmath>
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
-using namespace glm;
+#include <algorithm>
+#include "MathHelpers.h"
+
 using namespace std;
 
 double c = 299792458.0;
@@ -19,144 +21,89 @@ double G = 6.67430e-11;
 struct Ray;
 void rk4Step(Ray& ray, double dλ, double rs);
 
-// --- Structs --- //
-struct Engine {
-    GLFWwindow* window;
-    int WIDTH = 800;
-    int HEIGHT = 600;
-    float width = 100000000000.0f; // Width of the viewport in meters
-    float height = 75000000000.0f; // Height of the viewport in meters
-
-    // Navigation state
+// --- Camera ---
+struct Camera2D {
+    float width = 100000000000.0f;
+    float height = 75000000000.0f;
     float offsetX = 0.0f, offsetY = 0.0f;
     float zoom = 1.0f;
     bool middleMousePressed = false;
-    double lastMouseX = 0.0, lastMouseY = 0;
-
-    Engine() {
-        if (!glfwInit()) {
-            cerr << "Failed to initialize GLFW" << endl;
-            exit(EXIT_FAILURE);
+    double lastMouseX = 0.0, lastMouseY = 0.0;
+    
+    void processInput(bool leftClick, double mouseX, double mouseY) {
+        if (leftClick) {
+            if (!middleMousePressed) {
+                middleMousePressed = true;
+                lastMouseX = mouseX;
+                lastMouseY = mouseY;
+            } else {
+                float dx = float(mouseX - lastMouseX);
+                float dy = float(mouseY - lastMouseY);
+                offsetX -= dx * (width / 400.0f);
+                offsetY += dy * (height / 300.0f);
+                lastMouseX = mouseX;
+                lastMouseY = mouseY;
+            }
+        } else {
+            middleMousePressed = false;
         }
-        window = glfwCreateWindow(WIDTH, HEIGHT, "Black Hole Simulation", NULL, NULL);
-        if (!window) {
-            cerr << "Failed to create GLFW window" << endl;
-            glfwTerminate();
-            exit(EXIT_FAILURE);
-        }
-        glfwMakeContextCurrent(window);
-        glewExperimental = GL_TRUE;
-        if (glewInit() != GLEW_OK) {
-            cerr << "Failed to initialize GLEW" << endl;
-            glfwDestroyWindow(window);
-            glfwTerminate();
-            exit(EXIT_FAILURE);
-        }
-        glViewport(0, 0, WIDTH, HEIGHT);;
     }
-
-    void run() {
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        glMatrixMode(GL_PROJECTION);
-        glLoadIdentity();
-        double left   = -width + offsetX;
-        double right  =  width + offsetX;
-        double bottom = -height + offsetY;
-        double top    =  height + offsetY;
-        glOrtho(left, right, bottom, top, -1.0, 1.0);
-        glMatrixMode(GL_MODELVIEW);
-        glLoadIdentity();
+    
+    void processScroll(float dy) {
+        float zoomFactor = 1.0f + dy * 0.05f;
+        width *= zoomFactor;
+        height *= zoomFactor;
     }
 };
-Engine engine;
+Camera2D camera2d;
+
+// --- Physics ---
 struct BlackHole {
-    vec3 position;
+    simd::float3 position;
     double mass;
     double radius;
     double r_s;
 
-    BlackHole(vec3 pos, float m) : position(pos), mass(m) {r_s = 2.0 * G * mass / (c*c);}
-    void draw() {
-        glBegin(GL_TRIANGLE_FAN);
-        glColor3f(1.0f, 0.0f, 0.0f);               // Red color for the black hole
-        glVertex2f(0.0f, 0.0f);                    // Center
+    BlackHole(simd::float3 pos, float m) : position(pos), mass(m) {r_s = 2.0 * G * mass / (c*c);}
+    
+    void getVertices(vector<float>& outVertices) {
+        outVertices.push_back(0.0f); outVertices.push_back(0.0f);
+        outVertices.push_back(1.0f); outVertices.push_back(0.0f); outVertices.push_back(0.0f); outVertices.push_back(1.0f);
         for(int i = 0; i <= 100; i++) {
             float angle = 2.0f * M_PI * i / 100;
-            float x = r_s * cos(angle); // Radius of 0.1
+            float x = r_s * cos(angle);
             float y = r_s * sin(angle);
-            glVertex2f(x, y);
+            outVertices.push_back(x); outVertices.push_back(y);
+            outVertices.push_back(1.0f); outVertices.push_back(0.0f); outVertices.push_back(0.0f); outVertices.push_back(1.0f);
         }
-        glEnd();
     }
 };
-BlackHole SagA(vec3(0.0f, 0.0f, 0.0f), 8.54e36); // Sagittarius A black hole
+BlackHole SagA(simd_make_float3(0.0f, 0.0f, 0.0f), 8.54e36);
+
 struct Ray{
-    // -- cartesian coords -- //
     double x;   double y;
-    // -- polar coords -- //
     double r;   double phi;
     double dr;  double dphi;
-    vector<vec2> trail; // trail of points
-    double E, L;             // conserved quantities
+    vector<simd::float2> trail;
+    double E, L;
 
-    Ray(vec2 pos, vec2 dir) : x(pos.x), y(pos.y), r(sqrt(pos.x * pos.x + pos.y * pos.y)), phi(atan2(pos.y, pos.x)), dr(dir.x), dphi(dir.y) {
-        // step 1) get polar coords (r, phi) :
+    Ray(simd::float2 pos, simd::float2 dir) : x(pos.x), y(pos.y), r(sqrt(pos.x * pos.x + pos.y * pos.y)), phi(atan2(pos.y, pos.x)), dr(dir.x), dphi(dir.y) {
         this->r = sqrt(x*x + y*y);
         this->phi = atan2(y, x);
-        // step 2) seed velocities :
-        dr = dir.x * cos(phi) + dir.y * sin(phi); // m/s
+        dr = dir.x * cos(phi) + dir.y * sin(phi);
         dphi  = ( -dir.x * sin(phi) + dir.y * cos(phi) ) / r;
-        // step 3) store conserved quantities
         L = r*r * dphi;
         double f = 1.0 - SagA.r_s/r;  
         double dt_dλ = sqrt( (dr*dr)/(f*f) + (r*r*dphi*dphi)/f );
         E = f * dt_dλ;
-        // step 4) start trail :
-        trail.push_back({x, y});
-    }
-    void draw(const std::vector<Ray>& rays) {
-        // draw current ray positions as points
-        glPointSize(2.0f);
-        glColor3f(1.0f, 0.0f, 0.0f);
-        glBegin(GL_POINTS);
-          for (const auto& ray : rays) {
-              glVertex2f(ray.x, ray.y);
-          }
-        glEnd();
-    
-        // turn on blending for the trails
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glLineWidth(1.0f);
-    
-        // draw each trail with fading alpha
-        for (const auto& ray : rays) {
-            size_t N = ray.trail.size();
-            if (N < 2) continue;
-    
-            glBegin(GL_LINE_STRIP);
-            for (size_t i = 0; i < N; ++i) {
-                // older points (i=0) get alpha≈0, newer get alpha≈1
-                float alpha = float(i) / float(N - 1);
-                glColor4f(1.0f, 1.0f, 1.0f, std::max(alpha, 0.05f));
-                glVertex2f(ray.trail[i].x, ray.trail[i].y);
-            }
-            glEnd();
-        }
-    
-        glDisable(GL_BLEND);
+        trail.push_back(simd_make_float2(x, y));
     }
     void step(double dλ, double rs) {
-        // 1) integrate (r,φ,dr,dφ)
-        if(r <= rs) return; // stop if inside the event horizon
+        if(r <= rs) return;
         rk4Step(*this, dλ, rs);
-
-        // 2) convert back to cartesian x,y
         x = r * cos(phi);
         y = r * sin(phi);
-
-        // 3) record the trail
-        trail.push_back({ float(x), float(y) });
+        trail.push_back(simd_make_float2(float(x), float(y)));
     }
 };
 vector<Ray> rays;
@@ -168,20 +115,13 @@ void geodesicRHS(const Ray& ray, double rhs[4], double rs) {
     double E    = ray.E;
 
     double f = 1.0 - rs/r;
-
-    // dr/dλ = dr
     rhs[0] = dr;
-    // dφ/dλ = dphi
     rhs[1] = dphi;
-
-    // d²r/dλ² from Schwarzschild null geodesic:
     double dt_dλ = E / f;
     rhs[2] = 
         - (rs/(2*r*r)) * f * (dt_dλ*dt_dλ)
         + (rs/(2*r*r*f)) * (dr*dr)
         + (r - rs) * (dphi*dphi);
-
-    // d²φ/dλ² = -2*(dr * dphi) / r
     rhs[3] = -2.0 * dr * dphi / r;
 }
 void addState(const double a[4], const double b[4], double factor, double out[4]) {
@@ -211,21 +151,228 @@ void rk4Step(Ray& ray, double dλ, double rs) {
     ray.dphi += (dλ/6.0)*(k1[3] + 2*k2[3] + 2*k3[3] + k4[3]);
 }
 
-
-int main () {
-    //rays.push_back(Ray(vec2(-1e11, 3.27606302719999999e10), vec2(c, 0.0f)));
-    while(!glfwWindowShouldClose(engine.window)) {
-        engine.run();
-        SagA.draw();
-
+// --- Renderer ---
+class Renderer : public MTK::ViewDelegate {
+public:
+    MTL::Device* device;
+    MTL::CommandQueue* commandQueue;
+    MTL::RenderPipelineState* renderPipelineState;
+    MTL::Buffer* uniformsBuffer;
+    
+    int WIDTH = 800;
+    int HEIGHT = 600;
+    
+    Renderer(MTL::Device* pDevice) : device(pDevice->retain()) {
+        commandQueue = device->newCommandQueue();
+        
+        NS::Error* error = nullptr;
+        
+        // Try Xcode's default library first (when building via Xcode)
+        MTL::Library* library = device->newDefaultLibrary();
+        
+        // Fallback for CMake manual compilation
+        if (!library) {
+            NS::String* path = NS::String::string("lensing2d.metallib", NS::UTF8StringEncoding);
+            library = device->newLibrary(path, &error);
+        }
+        
+        if (!library) {
+            std::cerr << "Failed to load lensing2d.metallib\n";
+            exit(1);
+        }
+        
+        MTL::Function* vertFunc = library->newFunction(NS::String::string("color_vertex", NS::UTF8StringEncoding));
+        MTL::Function* fragFunc = library->newFunction(NS::String::string("color_fragment", NS::UTF8StringEncoding));
+        
+        MTL::RenderPipelineDescriptor* desc = MTL::RenderPipelineDescriptor::alloc()->init();
+        desc->setVertexFunction(vertFunc);
+        desc->setFragmentFunction(fragFunc);
+        desc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormatBGRA8Unorm);
+        desc->colorAttachments()->object(0)->setBlendingEnabled(true);
+        desc->colorAttachments()->object(0)->setSourceRGBBlendFactor(MTL::BlendFactorSourceAlpha);
+        desc->colorAttachments()->object(0)->setDestinationRGBBlendFactor(MTL::BlendFactorOneMinusSourceAlpha);
+        desc->colorAttachments()->object(0)->setSourceAlphaBlendFactor(MTL::BlendFactorSourceAlpha);
+        desc->colorAttachments()->object(0)->setDestinationAlphaBlendFactor(MTL::BlendFactorOneMinusSourceAlpha);
+        
+        MTL::VertexDescriptor* vd = MTL::VertexDescriptor::alloc()->init();
+        vd->attributes()->object(0)->setFormat(MTL::VertexFormatFloat2);
+        vd->attributes()->object(0)->setOffset(0);
+        vd->attributes()->object(0)->setBufferIndex(0);
+        vd->attributes()->object(1)->setFormat(MTL::VertexFormatFloat4);
+        vd->attributes()->object(1)->setOffset(2*sizeof(float));
+        vd->attributes()->object(1)->setBufferIndex(0);
+        vd->layouts()->object(0)->setStride(6*sizeof(float));
+        desc->setVertexDescriptor(vd);
+        
+        renderPipelineState = device->newRenderPipelineState(desc, &error);
+        vertFunc->release(); fragFunc->release(); desc->release(); vd->release(); library->release();
+        
+        uniformsBuffer = device->newBuffer(sizeof(simd::float4x4), MTL::ResourceStorageModeShared);
+    }
+    
+    ~Renderer() {
+        uniformsBuffer->release();
+        renderPipelineState->release();
+        commandQueue->release();
+        device->release();
+    }
+    
+    virtual void drawableSizeWillChange(MTK::View* pView, CGSize size) override {
+        WIDTH = size.width;
+        HEIGHT = size.height;
+    }
+    
+    virtual void drawInMTKView(MTK::View* pView) override {
+        // --- Input Handling ---
+        bool isActive = ((bool(*)(id, SEL))objc_msgSend)((id)NS::Application::sharedApplication(), sel_registerName("isActive"));
+        if (isActive) {
+            CGEventRef event = CGEventCreate(NULL);
+            CGPoint mousePos = CGEventGetLocation(event);
+            CFRelease(event);
+            
+            bool leftClick = CGEventSourceButtonState(kCGEventSourceStateHIDSystemState, kCGMouseButtonLeft);
+            camera2d.processInput(leftClick, mousePos.x, mousePos.y);
+        }
+        
+        // --- Physics ---
         for (auto& ray : rays) {
             ray.step(1.0f, SagA.r_s);
-            ray.draw(rays);
         }
+        
+        // --- Rendering ---
+        CA::MetalDrawable* drawable = pView->currentDrawable();
+        if (!drawable) return;
+        
+        MTL::CommandBuffer* cmdBuf = commandQueue->commandBuffer();
+        
+        MTL::RenderPassDescriptor* passDesc = pView->currentRenderPassDescriptor();
+        if (passDesc != nullptr) {
+            MTL::RenderCommandEncoder* ren = cmdBuf->renderCommandEncoder(passDesc);
+            ren->setRenderPipelineState(renderPipelineState);
+            
+            double left = -camera2d.width + camera2d.offsetX;
+            double right = camera2d.width + camera2d.offsetX;
+            double bottom = -camera2d.height + camera2d.offsetY;
+            double top = camera2d.height + camera2d.offsetY;
+            simd::float4x4 proj = math::ortho((float)left, (float)right, (float)bottom, (float)top, -1.0f, 1.0f);
+            
+            memcpy(uniformsBuffer->contents(), &proj, sizeof(simd::float4x4));
+            ren->setVertexBuffer(uniformsBuffer, 0, 1);
+            
+            // Draw black hole
+            vector<float> bhVerts;
+            SagA.getVertices(bhVerts);
+            MTL::Buffer* bhBuf = device->newBuffer(bhVerts.data(), bhVerts.size()*sizeof(float), MTL::ResourceStorageModeShared);
+            ren->setVertexBuffer(bhBuf, 0, 0);
+            ren->drawPrimitives(MTL::PrimitiveTypeTriangleStrip, NS::UInteger(0), NS::UInteger(102));
+            bhBuf->release();
+            
+            // Draw rays
+            for (const auto& ray : rays) {
+                size_t N = ray.trail.size();
+                if (N < 2) continue;
+                vector<float> trailVerts;
+                for (size_t i = 0; i < N; ++i) {
+                    float alpha = float(i) / float(N - 1);
+                    trailVerts.push_back(ray.trail[i].x);
+                    trailVerts.push_back(ray.trail[i].y);
+                    trailVerts.push_back(1.0f); trailVerts.push_back(1.0f); trailVerts.push_back(1.0f); trailVerts.push_back(std::max(alpha, 0.05f));
+                }
+                MTL::Buffer* trailBuf = device->newBuffer(trailVerts.data(), trailVerts.size()*sizeof(float), MTL::ResourceStorageModeShared);
+                ren->setVertexBuffer(trailBuf, 0, 0);
+                ren->drawPrimitives(MTL::PrimitiveTypeLineStrip, NS::UInteger(0), NS::UInteger(N));
+                trailBuf->release();
+                
+                // head point
+                float pointVert[] = { (float)ray.x, (float)ray.y, 1.0f, 0.0f, 0.0f, 1.0f };
+                MTL::Buffer* pointBuf = device->newBuffer(pointVert, sizeof(pointVert), MTL::ResourceStorageModeShared);
+                ren->setVertexBuffer(pointBuf, 0, 0);
+                ren->drawPrimitives(MTL::PrimitiveTypePoint, NS::UInteger(0), NS::UInteger(1));
+                pointBuf->release();
+            }
+            ren->endEncoding();
+        }
+        cmdBuf->presentDrawable(drawable);
+        cmdBuf->commit();
+    }
+};
 
-        glfwSwapBuffers(engine.window);
-        glfwPollEvents();
+void scrollWheelImpl(id self, SEL cmd, id event) {
+    double dy = ((double(*)(id, SEL))objc_msgSend)(event, sel_registerName("scrollingDeltaY"));
+    camera2d.processScroll(static_cast<float>(dy));
+}
+
+// --- App Delegate ---
+class AppDelegate : public NS::ApplicationDelegate {
+public:
+    NS::Window* _window;
+    MTK::View* _mtkView;
+    MTL::Device* _device;
+    Renderer* _renderer;
+
+    ~AppDelegate() {
+        _mtkView->release();
+        _window->release();
+        _device->release();
+        delete _renderer;
+    }
+    
+    virtual void applicationWillFinishLaunching(NS::Notification* notification) override {
+        NS::Menu* menu = NS::Menu::alloc()->init();
+        NS::MenuItem* appMenuItem = NS::MenuItem::alloc()->init();
+        menu->addItem(appMenuItem);
+        NS::Application::sharedApplication()->setMainMenu(menu);
+        
+        NS::Menu* appMenu = NS::Menu::alloc()->init(NS::String::string("App", NS::UTF8StringEncoding));
+        NS::String* quitTitle = NS::String::string("Quit", NS::UTF8StringEncoding);
+        NS::MenuItem* quitItem = appMenu->addItem(quitTitle, sel_registerName("terminate:"), NS::String::string("q", NS::UTF8StringEncoding));
+        appMenuItem->setSubmenu(appMenu);
+    }
+    
+    virtual void applicationDidFinishLaunching(NS::Notification* notification) override {
+        CGRect frame = (CGRect){ {100, 100}, {800, 600} };
+        _window = NS::Window::alloc()->init(frame, NS::WindowStyleMaskClosable|NS::WindowStyleMaskTitled|NS::WindowStyleMaskResizable, NS::BackingStoreBuffered, false);
+        _window->setTitle(NS::String::string("Black Hole 2D (100% Metal)", NS::UTF8StringEncoding));
+        
+        _device = MTL::CreateSystemDefaultDevice();
+        
+        static Class customViewClass = nullptr;
+        if (!customViewClass) {
+            Class mtkViewClass = objc_getClass("MTKView");
+            customViewClass = objc_allocateClassPair(mtkViewClass, "CustomMTKView2D", 0);
+            class_addMethod(customViewClass, sel_registerName("scrollWheel:"), (IMP)scrollWheelImpl, "v@:@");
+            objc_registerClassPair(customViewClass);
+        }
+        
+        id viewAlloc = ((id(*)(Class, SEL))objc_msgSend)(customViewClass, sel_registerName("alloc"));
+        _mtkView = ((MTK::View*)viewAlloc)->init(frame, _device);
+        
+        _mtkView->setColorPixelFormat(MTL::PixelFormatBGRA8Unorm);
+        _mtkView->setClearColor(MTL::ClearColor::Make(0,0,0,1));
+        
+        _renderer = new Renderer(_device);
+        _mtkView->setDelegate(_renderer);
+        
+        _window->setContentView(_mtkView);
+        _window->makeKeyAndOrderFront(nullptr);
+    }
+    
+    virtual bool applicationShouldTerminateAfterLastWindowClosed(NS::Application* sender) override {
+        return true;
+    }
+};
+
+int main() {
+    for (int i = 0; i < 20; ++i) {
+        float y = 1.0e10f + i * 2.5e9f;
+        rays.push_back(Ray(simd_make_float2(-1e11f, y), simd_make_float2(c, 0.0f)));
     }
 
+    NS::Application* app = NS::Application::sharedApplication();
+    app->setActivationPolicy(NS::ActivationPolicyRegular);
+    app->activateIgnoringOtherApps(true);
+    AppDelegate delegate;
+    app->setDelegate(&delegate);
+    app->run();
     return 0;
 }

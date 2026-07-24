@@ -1,0 +1,14 @@
+[
+    {
+        "label": "CMake Build All",
+        "command": "cmake --build build",
+        "use_new_terminal": false,
+        "allow_concurrent_runs": false
+    },
+    {
+        "label": "CMake Configure",
+        "command": "cmake -B build -S .",
+        "use_new_terminal": false,
+        "allow_concurrent_runs": false
+    }
+]
