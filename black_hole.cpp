@@ -130,6 +130,7 @@ public:
     MTL::Buffer* gridVBO = nullptr;
     MTL::Buffer* gridEBO = nullptr;
     int gridIndexCount = 0;
+    bool gridInitialized = false;
     
     MTL::Buffer* quadVBO;
     
@@ -254,12 +255,19 @@ public:
         texDesc->release();
     }
 
-    void generateGrid(const vector<ObjectData>& objects) {
+    void generateGrid(const vector<ObjectData>& objects, bool forceUpdate = false) {
+        if (gridInitialized && !Gravity && !forceUpdate) return;
+
         const int gridSize = 100;
         const float spacing = 2.5e9f;
+        const int numVertices = (gridSize + 1) * (gridSize + 1);
 
-        vector<simd::float3> vertices;
-        vector<uint32_t> indices;
+        if (!gridVBO) {
+            gridVBO = device->newBuffer(numVertices * sizeof(simd::float3), MTL::ResourceStorageModeShared);
+        }
+
+        simd::float3* vboData = (simd::float3*)gridVBO->contents();
+        int vIdx = 0;
 
         for (int z = 0; z <= gridSize; ++z) {
             for (int x = 0; x <= gridSize; ++x) {
@@ -279,34 +287,30 @@ public:
                         double deltaY = 2.0 * sqrt(r_s * (dist - r_s));
                         y += static_cast<float>(deltaY) - 3e10f;
                     } else {
-                        // In General Relativity, Flamm's paraboloid (the spatial embedding of the Schwarzschild metric)
-                        // stops exactly at the event horizon (r = r_s). The interior cannot be embedded in 3D space.
-                        // We cap it at the horizon depth to avoid the previous discontinuity spike.
                         y -= 3e10f;
                     }
                 }
-                vertices.push_back(simd_make_float3(worldX, y, worldZ));
+                vboData[vIdx++] = simd_make_float3(worldX, y, worldZ);
             }
         }
 
-        for (int z = 0; z <= gridSize; ++z) {
-            for (int x = 0; x <= gridSize; ++x) {
-                int i = z * (gridSize + 1) + x;
-                if (x < gridSize) {
-                    indices.push_back(i); indices.push_back(i + 1);
-                }
-                if (z < gridSize) {
-                    indices.push_back(i); indices.push_back(i + gridSize + 1);
+        if (!gridInitialized) {
+            vector<uint32_t> indices;
+            for (int z = 0; z <= gridSize; ++z) {
+                for (int x = 0; x <= gridSize; ++x) {
+                    int i = z * (gridSize + 1) + x;
+                    if (x < gridSize) {
+                        indices.push_back(i); indices.push_back(i + 1);
+                    }
+                    if (z < gridSize) {
+                        indices.push_back(i); indices.push_back(i + gridSize + 1);
+                    }
                 }
             }
+            gridEBO = device->newBuffer(indices.data(), indices.size() * sizeof(uint32_t), MTL::ResourceStorageModeShared);
+            gridIndexCount = indices.size();
+            gridInitialized = true;
         }
-
-        if (gridVBO) gridVBO->release();
-        if (gridEBO) gridEBO->release();
-        
-        gridVBO = device->newBuffer(vertices.data(), vertices.size() * sizeof(simd::float3), MTL::ResourceStorageModeShared);
-        gridEBO = device->newBuffer(indices.data(), indices.size() * sizeof(uint32_t), MTL::ResourceStorageModeShared);
-        gridIndexCount = indices.size();
     }
     
     virtual void drawableSizeWillChange(MTK::View* pView, CGSize size) override {

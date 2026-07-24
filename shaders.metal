@@ -147,16 +147,25 @@ kernel void geodesic(texture2d<float, access::write> outImage [[texture(0)]],
     float3 hitCenter = float3(0.0);
     float hitRadius = 0.0;
 
-    int steps = cam.moving ? 60000 : 60000;
+    int steps = cam.moving ? 5000 : 60000;
 
     for (int i = 0; i < steps; ++i) {
         if (intercept(ray, SagA_rs)) { hitBlackHole = true; break; }
-        rk4Step(ray, D_LAMBDA);
-        lambda += D_LAMBDA;
+        
+        // Adaptive step size: take larger steps far away, smaller steps near the horizon
+        float adaptive_dL = D_LAMBDA * (1.0 + (ray.r - SagA_rs) / (SagA_rs * 2.0));
+        adaptive_dL = min(adaptive_dL, D_LAMBDA * 50.0); // Cap step size to avoid jumping over objects
+        
+        rk4Step(ray, adaptive_dL);
+        lambda += adaptive_dL;
 
         float3 newPos = float3(ray.x, ray.y, ray.z);
-        if (crossesEquatorialPlane(prevPos, newPos, disk)) { hitDisk = true; break; }
+        if (prevPos.y * newPos.y <= 0.0) { // Only check disk if crossing equatorial plane
+            if (crossesEquatorialPlane(prevPos, newPos, disk)) { hitDisk = true; break; }
+        }
+        
         if (interceptObject(ray, objs, objectColor, hitCenter, hitRadius)) { hitObject = true; break; }
+        
         prevPos = newPos;
         if (ray.r > ESCAPE_R) break;
     }

@@ -158,6 +158,8 @@ public:
     MTL::CommandQueue* commandQueue;
     MTL::RenderPipelineState* renderPipelineState;
     MTL::Buffer* uniformsBuffer;
+    MTL::Buffer* dynamicVBO;
+    int maxDynamicFloats = 1000000;
     
     int WIDTH = 800;
     int HEIGHT = 600;
@@ -208,9 +210,11 @@ public:
         vertFunc->release(); fragFunc->release(); desc->release(); vd->release(); library->release();
         
         uniformsBuffer = device->newBuffer(sizeof(simd::float4x4), MTL::ResourceStorageModeShared);
+        dynamicVBO = device->newBuffer(maxDynamicFloats * sizeof(float), MTL::ResourceStorageModeShared);
     }
     
     ~Renderer() {
+        dynamicVBO->release();
         uniformsBuffer->release();
         renderPipelineState->release();
         commandQueue->release();
@@ -268,27 +272,41 @@ public:
             bhBuf->release();
             
             // Draw rays
+            float* vboData = (float*)dynamicVBO->contents();
+            int currentFloatOffset = 0;
+
             for (const auto& ray : rays) {
                 size_t N = ray.trail.size();
                 if (N < 2) continue;
-                vector<float> trailVerts;
+                
+                int requiredFloats = (N * 6) + 6; // 6 floats per trail vertex, 6 for the head point
+                if (currentFloatOffset + requiredFloats > maxDynamicFloats) break; // prevent overflow
+
+                int trailOffset = currentFloatOffset;
                 for (size_t i = 0; i < N; ++i) {
                     float alpha = float(i) / float(N - 1);
-                    trailVerts.push_back(ray.trail[i].x);
-                    trailVerts.push_back(ray.trail[i].y);
-                    trailVerts.push_back(1.0f); trailVerts.push_back(1.0f); trailVerts.push_back(1.0f); trailVerts.push_back(std::max(alpha, 0.05f));
+                    vboData[currentFloatOffset++] = (float)ray.trail[i].x;
+                    vboData[currentFloatOffset++] = (float)ray.trail[i].y;
+                    vboData[currentFloatOffset++] = 1.0f;
+                    vboData[currentFloatOffset++] = 1.0f;
+                    vboData[currentFloatOffset++] = 1.0f;
+                    vboData[currentFloatOffset++] = std::max(alpha, 0.05f);
                 }
-                MTL::Buffer* trailBuf = device->newBuffer(trailVerts.data(), trailVerts.size()*sizeof(float), MTL::ResourceStorageModeShared);
-                ren->setVertexBuffer(trailBuf, 0, 0);
+                
+                ren->setVertexBuffer(dynamicVBO, trailOffset * sizeof(float), 0);
                 ren->drawPrimitives(MTL::PrimitiveTypeLineStrip, NS::UInteger(0), NS::UInteger(N));
-                trailBuf->release();
                 
                 // head point
-                float pointVert[] = { (float)ray.x, (float)ray.y, 1.0f, 0.0f, 0.0f, 1.0f };
-                MTL::Buffer* pointBuf = device->newBuffer(pointVert, sizeof(pointVert), MTL::ResourceStorageModeShared);
-                ren->setVertexBuffer(pointBuf, 0, 0);
+                int headOffset = currentFloatOffset;
+                vboData[currentFloatOffset++] = (float)ray.x;
+                vboData[currentFloatOffset++] = (float)ray.y;
+                vboData[currentFloatOffset++] = 1.0f;
+                vboData[currentFloatOffset++] = 0.0f;
+                vboData[currentFloatOffset++] = 0.0f;
+                vboData[currentFloatOffset++] = 1.0f;
+                
+                ren->setVertexBuffer(dynamicVBO, headOffset * sizeof(float), 0);
                 ren->drawPrimitives(MTL::PrimitiveTypePoint, NS::UInteger(0), NS::UInteger(1));
-                pointBuf->release();
             }
             ren->endEncoding();
         }
