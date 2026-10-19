@@ -4,10 +4,11 @@ A fully native macOS 3D and 2D Black Hole simulator, rewritten to use Apple's **
 
 ## Features
 
-1. **Ray-tracing**: Simulates gravitational lensing using Runge-Kutta 4 integration directly on the GPU Compute Shaders.
+1. **Ray-tracing**: Simulates gravitational lensing by integrating null geodesics on the GPU with Metal compute shaders. The trajectory is planar, so it is integrated as a reduced 4-state system in the orbital plane rather than full 3D spherical coordinates.
 2. **Accretion Disk**: Simulates an accretion disk that interacts visually with the black hole's gravity.
 3. **Spacetime Curvature**: Demonstrates visually the "trapdoor in spacetime" (Flamm's paraboloid) using a dynamic spacetime grid.
 4. **100% Native macOS**: Uses `metal-cpp` and AppKit for native windowing, trackpad scrolling, and GPU acceleration without heavy dependencies like GLFW or OpenGL.
+5. **Interactive performance**: The raytrace runs at drawable resolution, renders at half resolution while the camera moves, and skips the compute pass entirely when the scene is static.
 
 ---
 
@@ -40,15 +41,18 @@ Because this project is written in C++ but uses macOS native frameworks, you nee
 
 3. Compile the project:
    ```bash
-   make -C build
+   cmake --build build -j
    ```
 
 4. Run the simulation:
    ```bash
-   cd build
-   ./BlackHole3D   # For the 3D Spacetime & Raytracing Simulation
-   ./BlackHole2D   # For the 2D Gravitational Lensing Simulation
+   ./build/BlackHole3D   # For the 3D Spacetime & Raytracing Simulation
+   ./build/BlackHole2D   # For the 2D Gravitational Lensing Simulation
    ```
+
+The `.metal` sources are compiled to `.metallib` as part of the build, so no manual
+shader step is needed. Both the shader libraries and the executables are build
+artifacts and are not tracked by git.
 
 ---
 
@@ -69,10 +73,20 @@ Because this project is written in C++ but uses macOS native frameworks, you nee
 5. Change the **C++ Language Dialect** to `C++17` (or newer).
 6. Press the Play button! Xcode will automatically compile `shaders.metal` into its default `.metallib` and run the simulation natively.
 
+To build the 2D viewer in Xcode instead, swap `black_hole.cpp` for `2D_lensing.cpp` and `shaders.metal` for `lensing2d.metal`.
+
 ---
 
 ## **Controls**
 
+### 3D Simulation (`BlackHole3D`)
+
 - **Left Click + Drag**: Rotate the camera around the black hole.
 - **Scroll (Mouse Wheel / Two-finger Trackpad)**: Zoom in and out.
 - **Key 'G'**: Toggle Gravity on and off for the surrounding celestial objects (they will start orbiting the black hole and bending spacetime dynamically).
+
+### 2D Lensing View (`BlackHole2D`)
+
+- **Left Click + Drag**: Pan the view.
+- **Scroll (Mouse Wheel / Two-finger Trackpad)**: Zoom in and out.
+
