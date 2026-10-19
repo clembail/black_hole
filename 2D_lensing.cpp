@@ -87,6 +87,10 @@ struct Ray{
     vector<simd::float2> trail;
     double E, L;
 
+    // The trail used to grow without bound, so both memory use and the
+    // per-frame vertex upload grew linearly with the number of frames.
+    static constexpr size_t kMaxTrail = 4096;
+
     Ray(simd::float2 pos, simd::float2 dir) : x(pos.x), y(pos.y), r(sqrt(pos.x * pos.x + pos.y * pos.y)), phi(atan2(pos.y, pos.x)), dr(dir.x), dphi(dir.y) {
         this->r = sqrt(x*x + y*y);
         this->phi = atan2(y, x);
@@ -96,6 +100,7 @@ struct Ray{
         double f = 1.0 - SagA.r_s/r;  
         double dt_dλ = sqrt( (dr*dr)/(f*f) + (r*r*dphi*dphi)/f );
         E = f * dt_dλ;
+        trail.reserve(kMaxTrail);
         trail.push_back(simd_make_float2(x, y));
     }
     void step(double dλ, double rs) {
@@ -103,6 +108,10 @@ struct Ray{
         rk4Step(*this, dλ, rs);
         x = r * cos(phi);
         y = r * sin(phi);
+        if (trail.size() >= kMaxTrail) {
+            // Keep the most recent history once the cap is reached.
+            trail.erase(trail.begin());
+        }
         trail.push_back(simd_make_float2(float(x), float(y)));
     }
 };
@@ -128,22 +137,42 @@ void addState(const double a[4], const double b[4], double factor, double out[4]
     for (int i = 0; i < 4; i++)
         out[i] = a[i] + b[i] * factor;
 }
+
+// Evaluate the RHS from a raw (r, phi, dr, dphi) state plus the conserved
+// energy E, avoiding the Ray copies the old RK4 stages relied on.
+void geodesicRHSAt(const double s[4], double E, double rhs[4], double rs) {
+    double r    = s[0];
+    double dr   = s[2];
+    double dphi = s[3];
+
+    double f  = 1.0 - rs/r;
+    double dt = E / f;
+
+    rhs[0] = dr;
+    rhs[1] = dphi;
+    rhs[2] = -(rs/(2*r*r)) * f * (dt*dt)
+           +  (rs/(2*r*r*f)) * (dr*dr)
+           +  (r - rs) * (dphi*dphi);
+    rhs[3] = -2.0 * dr * dphi / r;
+}
 void rk4Step(Ray& ray, double dλ, double rs) {
+    // Only the four integration variables are needed here. The previous
+    // version constructed three temporary Ray copies per step, each of which
+    // deep-copied the (growing) trail vector — that made the integrator
+    // O(steps^2) in allocations alone.
     double y0[4] = { ray.r, ray.phi, ray.dr, ray.dphi };
     double k1[4], k2[4], k3[4], k4[4], temp[4];
 
     geodesicRHS(ray, k1, rs);
+
     addState(y0, k1, dλ/2.0, temp);
-    Ray r2 = ray; r2.r=temp[0]; r2.phi=temp[1]; r2.dr=temp[2]; r2.dphi=temp[3];
-    geodesicRHS(r2, k2, rs);
+    geodesicRHSAt(temp, ray.E, k2, rs);
 
     addState(y0, k2, dλ/2.0, temp);
-    Ray r3 = ray; r3.r=temp[0]; r3.phi=temp[1]; r3.dr=temp[2]; r3.dphi=temp[3];
-    geodesicRHS(r3, k3, rs);
+    geodesicRHSAt(temp, ray.E, k3, rs);
 
     addState(y0, k3, dλ, temp);
-    Ray r4 = ray; r4.r=temp[0]; r4.phi=temp[1]; r4.dr=temp[2]; r4.dphi=temp[3];
-    geodesicRHS(r4, k4, rs);
+    geodesicRHSAt(temp, ray.E, k4, rs);
 
     ray.r    += (dλ/6.0)*(k1[0] + 2*k2[0] + 2*k3[0] + k4[0]);
     ray.phi  += (dλ/6.0)*(k1[1] + 2*k2[1] + 2*k3[1] + k4[1]);
@@ -159,6 +188,8 @@ public:
     MTL::RenderPipelineState* renderPipelineState;
     MTL::Buffer* uniformsBuffer;
     MTL::Buffer* dynamicVBO;
+    MTL::Buffer* blackHoleVBO = nullptr;
+    int blackHoleVertexCount = 0;
     int maxDynamicFloats = 1000000;
     
     int WIDTH = 800;
@@ -211,9 +242,17 @@ public:
         
         uniformsBuffer = device->newBuffer(sizeof(simd::float4x4), MTL::ResourceStorageModeShared);
         dynamicVBO = device->newBuffer(maxDynamicFloats * sizeof(float), MTL::ResourceStorageModeShared);
+
+        // The black hole outline never changes; upload it once instead of
+        // allocating and releasing a GPU buffer every frame.
+        vector<float> bhVerts;
+        SagA.getVertices(bhVerts);
+        blackHoleVBO = device->newBuffer(bhVerts.data(), bhVerts.size()*sizeof(float), MTL::ResourceStorageModeShared);
+        blackHoleVertexCount = bhVerts.size() / 6;
     }
     
     ~Renderer() {
+        blackHoleVBO->release();
         dynamicVBO->release();
         uniformsBuffer->release();
         renderPipelineState->release();
@@ -264,12 +303,8 @@ public:
             ren->setVertexBuffer(uniformsBuffer, 0, 1);
             
             // Draw black hole
-            vector<float> bhVerts;
-            SagA.getVertices(bhVerts);
-            MTL::Buffer* bhBuf = device->newBuffer(bhVerts.data(), bhVerts.size()*sizeof(float), MTL::ResourceStorageModeShared);
-            ren->setVertexBuffer(bhBuf, 0, 0);
-            ren->drawPrimitives(MTL::PrimitiveTypeTriangleStrip, NS::UInteger(0), NS::UInteger(102));
-            bhBuf->release();
+            ren->setVertexBuffer(blackHoleVBO, 0, 0);
+            ren->drawPrimitives(MTL::PrimitiveTypeTriangleStrip, NS::UInteger(0), NS::UInteger(blackHoleVertexCount));
             
             // Draw rays
             float* vboData = (float*)dynamicVBO->contents();

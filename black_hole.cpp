@@ -10,6 +10,7 @@
 #define _USE_MATH_DEFINES
 #include <cmath>
 #include <algorithm>
+#include <limits>
 
 #include "MathHelpers.h"
 
@@ -136,8 +137,22 @@ public:
     
     int WIDTH = 800;
     int HEIGHT = 600;
-    int COMPUTE_WIDTH  = 200;
-    int COMPUTE_HEIGHT = 150;
+    // The raytrace runs at drawable resolution. It used to be fixed at
+    // 200x150, which threw away almost all of the display's detail.
+    int COMPUTE_WIDTH  = 800;
+    int COMPUTE_HEIGHT = 600;
+
+    // While the camera is moving, render into a smaller texture and let the
+    // fullscreen quad upscale it. Motion hides the reduced detail and the
+    // compute cost drops with the pixel count.
+    float renderScale = 1.0f;
+    float interactiveScale = 0.5f;
+
+    // Set whenever something that affects the image changed. When it stays
+    // clear the expensive compute pass is skipped entirely and the previous
+    // result is presented again.
+    bool needsRedraw = true;
+    simd::float3 lastCamPos = {0.0f, 0.0f, 0.0f};
     
     Renderer(MTL::Device* pDevice) : device(pDevice->retain()) {
         commandQueue = device->newCommandQueue();
@@ -211,7 +226,7 @@ public:
         // Buffers
         cameraUBO = device->newBuffer(128, MTL::ResourceStorageModeShared);
         diskUBO = device->newBuffer(sizeof(float)*4, MTL::ResourceStorageModeShared);
-        size_t objSize = sizeof(int) + 3*sizeof(float) + 16*sizeof(simd::float4)*2 + 16*sizeof(float);
+        size_t objSize = sizeof(int) + 3*sizeof(float) + 16*sizeof(simd::float4)*2 + 16*sizeof(float) + 4*sizeof(float);
         objectsUBO = device->newBuffer(objSize, MTL::ResourceStorageModeShared);
         gridUniformsBuffer = device->newBuffer(sizeof(simd::float4x4), MTL::ResourceStorageModeShared);
         
@@ -253,6 +268,7 @@ public:
         texDesc->setUsage(MTL::TextureUsageShaderWrite | MTL::TextureUsageShaderRead);
         renderTexture = device->newTexture(texDesc);
         texDesc->release();
+        needsRedraw = true;
     }
 
     void generateGrid(const vector<ObjectData>& objects, bool forceUpdate = false) {
@@ -269,23 +285,30 @@ public:
         simd::float3* vboData = (simd::float3*)gridVBO->contents();
         int vIdx = 0;
 
+        // Precompute per-object Schwarzschild radius once instead of once per
+        // vertex (this loop runs over ~10k vertices every frame while gravity
+        // is enabled).
+        struct GridSource { float x, z, r_s; };
+        vector<GridSource> sources;
+        sources.reserve(objects.size());
+        for (const auto& obj : objects) {
+            sources.push_back({ obj.posRadius.x, obj.posRadius.z,
+                                float(2.0 * G * obj.mass / (c * c)) });
+        }
+
         for (int z = 0; z <= gridSize; ++z) {
             for (int x = 0; x <= gridSize; ++x) {
                 float worldX = (x - gridSize / 2.0f) * spacing;
                 float worldZ = (z - gridSize / 2.0f) * spacing;
                 float y = 0.0f;
 
-                for (const auto& obj : objects) {
-                    simd::float3 objPos = {obj.posRadius.x, obj.posRadius.y, obj.posRadius.z};
-                    double mass = obj.mass;
-                    double r_s = 2.0 * G * mass / (c * c);
-                    double dx = worldX - objPos.x;
-                    double dz = worldZ - objPos.z;
-                    double dist = sqrt(dx * dx + dz * dz);
+                for (const auto& src : sources) {
+                    float dx = worldX - src.x;
+                    float dz = worldZ - src.z;
+                    float dist = sqrtf(dx * dx + dz * dz);
 
-                    if (dist > r_s) {
-                        double deltaY = 2.0 * sqrt(r_s * (dist - r_s));
-                        y += static_cast<float>(deltaY) - 3e10f;
+                    if (dist > src.r_s) {
+                        y += 2.0f * sqrtf(src.r_s * (dist - src.r_s)) - 3e10f;
                     } else {
                         y -= 3e10f;
                     }
@@ -316,6 +339,14 @@ public:
     virtual void drawableSizeWillChange(MTK::View* pView, CGSize size) override {
         WIDTH = size.width;
         HEIGHT = size.height;
+        if (WIDTH > 0 && HEIGHT > 0) {
+            // Keep the compute texture at a sensible size: full drawable
+            // resolution is wasteful on a Retina panel for a fullscreen effect.
+            const float scale = renderScale;
+            COMPUTE_WIDTH  = std::max(1, int(WIDTH  * scale));
+            COMPUTE_HEIGHT = std::max(1, int(HEIGHT * scale));
+            reallocateTexture();
+        }
     }
     
     virtual void drawInMTKView(MTK::View* pView) override {
@@ -332,33 +363,50 @@ public:
             bool keyG = CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, kVK_ANSI_G);
             if (keyG && !prevKeyG) {
                 Gravity = !Gravity;
+                needsRedraw = true;
                 std::cout << "[INFO] Gravity turned " << (Gravity ? "ON" : "OFF") << std::endl;
             }
             prevKeyG = keyG;
+
+            // Any camera change invalidates the cached image.
+            simd::float3 camPos = camera.position();
+            if (camPos.x != lastCamPos.x || camPos.y != lastCamPos.y || camPos.z != lastCamPos.z) {
+                lastCamPos = camPos;
+                needsRedraw = true;
+            }
         }
         
         // --- Physics ---
+        // Symplectic leapfrog: compute every acceleration from the positions
+        // at the start of the step, then advance. The previous version updated
+        // each object's position inside the force loop, so the result depended
+        // on iteration order and effectively integrated with a half-step error.
         if (Gravity) {
-            for (auto& obj : objects) {
-                for (auto& obj2 : objects) {
-                    if (&obj == &obj2) continue;
-                    float dx = obj2.posRadius.x - obj.posRadius.x;
-                    float dy = obj2.posRadius.y - obj.posRadius.y;
-                    float dz = obj2.posRadius.z - obj.posRadius.z;
-                    float dist = sqrt(dx*dx + dy*dy + dz*dz);
-                    if (dist > 0) {
-                        double Gforce = (G * obj.mass * obj2.mass) / (dist * dist);
-                        double acc1 = Gforce / obj.mass;
-                        obj.velocity.x += (dx/dist)*acc1;
-                        obj.velocity.y += (dy/dist)*acc1;
-                        obj.velocity.z += (dz/dist)*acc1;
-                        
-                        obj.posRadius.x += obj.velocity.x;
-                        obj.posRadius.y += obj.velocity.y;
-                        obj.posRadius.z += obj.velocity.z;
-                    }
+            const size_t n = objects.size();
+            vector<simd::float3> accel(n, simd_make_float3(0.0f, 0.0f, 0.0f));
+            for (size_t i = 0; i < n; ++i) {
+                for (size_t j = i + 1; j < n; ++j) {
+                    float dx = objects[j].posRadius.x - objects[i].posRadius.x;
+                    float dy = objects[j].posRadius.y - objects[i].posRadius.y;
+                    float dz = objects[j].posRadius.z - objects[i].posRadius.z;
+                    float dist2 = dx*dx + dy*dy + dz*dz;
+                    if (dist2 <= 0.0f) continue;
+
+                    float dist = sqrt(dist2);
+                    // a = G * m_other / r^2, direction along the separation.
+                    double aMag = G / (double)dist2;
+                    simd::float3 u = simd_make_float3(dx / dist, dy / dist, dz / dist);
+                    accel[i] += u * float(aMag * objects[j].mass);
+                    accel[j] -= u * float(aMag * objects[i].mass);
                 }
             }
+            for (size_t i = 0; i < n; ++i) {
+                objects[i].velocity += accel[i];
+                objects[i].posRadius.x += objects[i].velocity.x;
+                objects[i].posRadius.y += objects[i].velocity.y;
+                objects[i].posRadius.z += objects[i].velocity.z;
+            }
+            needsRedraw = true;   // scene is animating
         }
         
         generateGrid(objects);
@@ -373,60 +421,88 @@ public:
 
         MTL::CommandBuffer* cmdBuf = commandQueue->commandBuffer();
         
-        // Compute Pass
-        MTL::ComputeCommandEncoder* computeEncoder = cmdBuf->computeCommandEncoder();
-        computeEncoder->setComputePipelineState(computePipelineState);
-        computeEncoder->setTexture(renderTexture, 0);
-        
-        // Upload Camera
-        struct CamData {
-            simd::float4 pos;
-            simd::float4 right;
-            simd::float4 up;
-            simd::float4 forward;
-            float tanHalfFov, aspect;
-            bool moving; int _pad4;
-        } camData;
-        
-        simd::float3 fwd = math::normalize(camera.target - camera.position());
-        simd::float3 upVec = {0, 1, 0};
-        simd::float3 rightVec = math::normalize(math::cross(fwd, upVec));
-        upVec = math::cross(rightVec, fwd);
-        
-        camData.pos = {camera.position().x, camera.position().y, camera.position().z, 0.0f};
-        camData.right = {rightVec.x, rightVec.y, rightVec.z, 0.0f};
-        camData.up = {upVec.x, upVec.y, upVec.z, 0.0f};
-        camData.forward = {fwd.x, fwd.y, fwd.z, 0.0f};
-        camData.tanHalfFov = tanf((60.0f * M_PI / 180.0f) * 0.5f);
-        camData.aspect = float(WIDTH) / float(HEIGHT);
-        camData.moving = camera.dragging || camera.panning;
-        memcpy(cameraUBO->contents(), &camData, sizeof(CamData));
-        
-        // Upload Disk
-        float diskData[4] = { (float)(SagA.r_s * 2.2f), (float)(SagA.r_s * 5.2f), 2.0f, 1e9f };
-        memcpy(diskUBO->contents(), diskData, sizeof(diskData));
-        
-        // Upload Objects
-        struct ObjUBOData {
-            int numObjects; float _p0, _p1, _p2;
-            simd::float4 posRadius[16]; simd::float4 color[16]; float mass[16];
-        } objData;
-        objData.numObjects = std::min((int)objects.size(), 16);
-        for(int i=0; i<objData.numObjects; ++i) {
-            objData.posRadius[i] = objects[i].posRadius;
-            objData.color[i] = objects[i].color;
-            objData.mass[i] = objects[i].mass;
+        // Compute Pass — skipped when the scene is unchanged, so an idle
+        // window costs a blit instead of a full raytrace.
+        if (needsRedraw) {
+            // Drop resolution while interacting, then restore it once the
+            // camera settles. This keeps dragging responsive at full-screen
+            // Retina sizes without permanently lowering quality.
+            const bool interacting = camera.dragging || camera.panning;
+            const float wantedScale = interacting ? interactiveScale : renderScale;
+            const int wantedW = std::max(1, int(WIDTH  * wantedScale));
+            const int wantedH = std::max(1, int(HEIGHT * wantedScale));
+            if (wantedW != COMPUTE_WIDTH || wantedH != COMPUTE_HEIGHT) {
+                COMPUTE_WIDTH  = wantedW;
+                COMPUTE_HEIGHT = wantedH;
+                reallocateTexture();
+            }
+
+            MTL::ComputeCommandEncoder* computeEncoder = cmdBuf->computeCommandEncoder();
+            computeEncoder->setComputePipelineState(computePipelineState);
+            computeEncoder->setTexture(renderTexture, 0);
+            
+            // Upload Camera
+            struct CamData {
+                simd::float4 pos;
+                simd::float4 right;
+                simd::float4 up;
+                simd::float4 forward;
+                float tanHalfFov, aspect;
+                bool moving; int _pad4;
+            } camData;
+            
+            simd::float3 fwd = math::normalize(camera.target - camera.position());
+            simd::float3 upVec = {0, 1, 0};
+            simd::float3 rightVec = math::normalize(math::cross(fwd, upVec));
+            upVec = math::cross(rightVec, fwd);
+            
+            camData.pos = {camera.position().x, camera.position().y, camera.position().z, 0.0f};
+            camData.right = {rightVec.x, rightVec.y, rightVec.z, 0.0f};
+            camData.up = {upVec.x, upVec.y, upVec.z, 0.0f};
+            camData.forward = {fwd.x, fwd.y, fwd.z, 0.0f};
+            camData.tanHalfFov = tanf((60.0f * M_PI / 180.0f) * 0.5f);
+            camData.aspect = float(WIDTH) / float(HEIGHT);
+            camData.moving = camera.dragging || camera.panning;
+            memcpy(cameraUBO->contents(), &camData, sizeof(CamData));
+            
+            // Upload Disk
+            float diskData[4] = { (float)(SagA.r_s * 2.2f), (float)(SagA.r_s * 5.2f), 2.0f, 1e9f };
+            memcpy(diskUBO->contents(), diskData, sizeof(diskData));
+            
+            // Upload Objects
+            struct ObjUBOData {
+                int numObjects; float _p0, _p1, _p2;
+                simd::float4 posRadius[16]; simd::float4 color[16]; float mass[16];
+                float objMinR, objMaxR, _q0, _q1;
+            } objData;
+            objData.numObjects = std::min((int)objects.size(), 16);
+            objData.objMinR = std::numeric_limits<float>::max();
+            objData.objMaxR = 0.0f;
+            for(int i=0; i<objData.numObjects; ++i) {
+                objData.posRadius[i] = objects[i].posRadius;
+                objData.color[i] = objects[i].color;
+                objData.mass[i] = objects[i].mass;
+
+                // Radial band spanned by the object, used by the shader to skip
+                // the per-object intersection loop while the ray is elsewhere.
+                float d = simd_length(objects[i].posRadius.xyz);
+                objData.objMinR = std::min(objData.objMinR, d - objects[i].posRadius.w);
+                objData.objMaxR = std::max(objData.objMaxR, d + objects[i].posRadius.w);
+            }
+            if (objData.numObjects == 0) { objData.objMinR = 0.0f; objData.objMaxR = 0.0f; }
+            memcpy(objectsUBO->contents(), &objData, sizeof(ObjUBOData));
+            
+            computeEncoder->setBuffer(cameraUBO, 0, 0);
+            computeEncoder->setBuffer(diskUBO, 0, 1);
+            computeEncoder->setBuffer(objectsUBO, 0, 2);
+            
+            MTL::Size gridSize = MTL::Size::Make(COMPUTE_WIDTH, COMPUTE_HEIGHT, 1);
+            MTL::Size threadGroupSize = MTL::Size::Make(16, 16, 1);
+            computeEncoder->dispatchThreads(gridSize, threadGroupSize);
+            computeEncoder->endEncoding();
+
+            needsRedraw = false;
         }
-        memcpy(objectsUBO->contents(), &objData, sizeof(ObjUBOData));
-        
-        computeEncoder->setBuffer(cameraUBO, 0, 0);
-        computeEncoder->setBuffer(diskUBO, 0, 1);
-        computeEncoder->setBuffer(objectsUBO, 0, 2);
-        
-        MTL::Size gridSize = MTL::Size::Make(COMPUTE_WIDTH, COMPUTE_HEIGHT, 1);
-        MTL::Size threadGroupSize = MTL::Size::Make(16, 16, 1);
-        computeEncoder->dispatchThreads(gridSize, threadGroupSize);
-        computeEncoder->endEncoding();
         
         // Render Pass
         MTL::RenderPassDescriptor* renderPassDesc = pView->currentRenderPassDescriptor();
