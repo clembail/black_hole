@@ -50,16 +50,34 @@ target_include_directories(BlackHole3D PRIVATE
 )
 
 # Shader compilation
-set(SHADER_SRC "${CMAKE_CURRENT_SOURCE_DIR}/shaders.metal")
-set(SHADER_LIB "$<TARGET_FILE_DIR:BlackHole3D>/shaders.metallib")
+#
+# Declared as real outputs rather than POST_BUILD commands so that editing a
+# .metal file triggers a rebuild. Previously the shaders were only recompiled
+# when the C++ target happened to relink, so a shader-only edit was silently
+# ignored.
+#
+# The .metallib must sit next to the executable, so pin both to the same
+# directory (generator expressions are not usable in OUTPUT).
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 
-add_custom_command(TARGET BlackHole3D POST_BUILD
-    COMMAND xcrun -sdk macosx metal -c ${SHADER_SRC} -o ${CMAKE_CURRENT_SOURCE_DIR}/shaders.air
-    COMMAND xcrun -sdk macosx metallib ${CMAKE_CURRENT_SOURCE_DIR}/shaders.air -o ${SHADER_LIB}
-    COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_CURRENT_SOURCE_DIR}/shaders.air
-)
-add_custom_command(TARGET BlackHole2D POST_BUILD
-    COMMAND xcrun -sdk macosx metal -c ${CMAKE_CURRENT_SOURCE_DIR}/lensing2d.metal -o ${CMAKE_CURRENT_SOURCE_DIR}/lensing2d.air
-    COMMAND xcrun -sdk macosx metallib ${CMAKE_CURRENT_SOURCE_DIR}/lensing2d.air -o $<TARGET_FILE_DIR:BlackHole2D>/lensing2d.metallib
-    COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_CURRENT_SOURCE_DIR}/lensing2d.air
-)
+function(add_metal_library target src out_name)
+    get_filename_component(src_abs "${src}" ABSOLUTE)
+    set(air "${CMAKE_BINARY_DIR}/${target}_${out_name}.air")
+    set(lib "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/${out_name}")
+
+    add_custom_command(
+        OUTPUT "${lib}"
+        COMMAND xcrun -sdk macosx metal -c "${src_abs}" -o "${air}"
+        COMMAND xcrun -sdk macosx metallib "${air}" -o "${lib}"
+        COMMAND ${CMAKE_COMMAND} -E remove "${air}"
+        DEPENDS "${src_abs}"
+        COMMENT "Compiling ${out_name}"
+        VERBATIM
+    )
+
+    add_custom_target(${target}_shaders DEPENDS "${lib}")
+    add_dependencies(${target} ${target}_shaders)
+endfunction()
+
+add_metal_library(BlackHole3D shaders.metal shaders.metallib)
+add_metal_library(BlackHole2D lensing2d.metal lensing2d.metallib)

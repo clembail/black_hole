@@ -13,6 +13,7 @@
 #include <limits>
 
 #include "MathHelpers.h"
+#include "ShaderPath.h"
 
 using namespace std;
 
@@ -162,10 +163,14 @@ public:
         // Try Xcode's default library first (when building via Xcode)
         MTL::Library* library = device->newDefaultLibrary();
         
-        // Fallback for CMake manual compilation
+        // Fallback for CMake manual compilation. Resolve the path relative to
+        // the executable rather than the working directory, so the binary can
+        // be launched from anywhere.
         if (!library) {
-            NS::String* path = NS::String::string("shaders.metallib", NS::UTF8StringEncoding);
+            std::string libPath = shader::libraryPath("shaders.metallib");
+            NS::String* path = NS::String::string(libPath.c_str(), NS::UTF8StringEncoding);
             library = device->newLibrary(path, &error);
+            if (!library) std::cerr << "Looked for shaders.metallib at: " << libPath << "\n";
         }
         
         if (!library) {

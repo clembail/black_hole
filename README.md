@@ -54,6 +54,9 @@ The `.metal` sources are compiled to `.metallib` as part of the build, so no man
 shader step is needed. Both the shader libraries and the executables are build
 artifacts and are not tracked by git.
 
+The programs locate their `.metallib` next to the executable, so they can be
+launched from any working directory.
+
 ---
 
 ## **Build Instructions (Xcode)**
